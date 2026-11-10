@@ -1,6 +1,12 @@
-name = "stride-music"
-pages_build_output_dir = "public"
+# Must match the Worker's name in the Cloudflare dashboard.
+name = "musicsunoapp"
+main = "src/worker.js"
 compatibility_date = "2025-01-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
 
 [vars]
 SUNO_API_BASE = "https://api.sunoapi.org"
