@@ -16,6 +16,8 @@ const POLL_LIMIT_MS = 10 * 60 * 1000;
 const STORE_KEY = "stride.tracks.v1";
 
 const $ = (id) => document.getElementById(id);
+const audio = document.getElementById("audio");
+let playingId = null;
 const state = { runType: RUN_TYPES[1], bpm: 150, mood: "Hype", genres: new Set(["Electronic"]), tracks: loadTracks() };
 
 // ---------- storage ----------
@@ -157,12 +159,16 @@ let liveTimer = null;
 let pollTimer = null;
 let currentTask = null;
 
-const STAGE = { PENDING: 1, TEXT_SUCCESS: 2, FIRST_SUCCESS: 3, SUCCESS: 4 };
+const STAGE = { PENDING: 2, TEXT_SUCCESS: 3, FIRST_SUCCESS: 3, SUCCESS: 4 };
 const STATUS_COPY = {
-  PENDING: "Lacing up — your track is in the queue…",
-  TEXT_SUCCESS: "Lyrics written. Laying down the beat…",
-  FIRST_SUCCESS: "First track crossed the line! Finishing the second…",
-  SUCCESS: "Run complete. Two fresh tracks ready.",
+  PENDING: "Step 2 of 3: Request accepted. Suno is writing the lyrics and song structure.",
+  TEXT_SUCCESS: "Step 3 of 3: Lyrics are done. Now recording the audio, which is the longest step.",
+  FIRST_SUCCESS: "Song 1 is ready to play! Song 2 is still finishing.",
+  SUCCESS: "Done! Both songs are ready. Press play below or find them in Activity.",
+};
+const STATUS_COPY_INSTRUMENTAL = {
+  PENDING: "Step 2 of 3: Request accepted. Suno is arranging the song structure.",
+  TEXT_SUCCESS: "Step 3 of 3: Arrangement is done. Now recording the audio, which is the longest step.",
 };
 const FAILURES = {
   CREATE_TASK_FAILED: "Couldn't start the task.",
@@ -182,18 +188,31 @@ function fmtTime(sec) {
 function openLive(req) {
   $("live").hidden = false;
   $("live").classList.remove("done");
-  $("liveType").textContent = state.runType.name.toUpperCase();
+  $("liveType").textContent = state.runType.name;
   $("liveBpm").textContent = state.bpm;
-  $("liveTracks").textContent = "0";
+  $("liveTracks").textContent = "0 / 2";
   $("results").innerHTML = "";
   $("liveDone").hidden = true;
-  setStage(1, "Warming up…");
+  $("liveClose").textContent = "Keep generating in background";
+  $("liveNote").hidden = false;
+  $("liveTimeLabel").textContent = "Time elapsed";
+  $("liveEta").hidden = false;
+  $("liveEta").textContent = "Songs usually take 2–4 minutes to create.";
+  $("step2Title").textContent = req.instrumental ? "Arranging" : "Writing lyrics";
+  $("step2Sub").textContent = req.instrumental ? "Building the song structure" : "Lyrics & song structure";
+  instrumentalRun = req.instrumental;
+  setStage(1, "Step 1 of 3: Sending your request to Suno…");
   const start = Date.now();
   $("liveTime").textContent = "00:00";
   clearInterval(liveTimer);
-  liveTimer = setInterval(() => ($("liveTime").textContent = fmtTime((Date.now() - start) / 1000)), 250);
+  liveTimer = setInterval(() => {
+    const sec = (Date.now() - start) / 1000;
+    $("liveTime").textContent = fmtTime(sec);
+    if (sec > 300) $("liveEta").textContent = "This is taking longer than usual, but it's still working. Hang tight.";
+  }, 250);
   document.body.style.overflow = "hidden";
 }
+let instrumentalRun = false;
 
 function closeLive() {
   $("live").hidden = true;
@@ -206,7 +225,7 @@ $("liveClose").addEventListener("click", () => {
 $("liveDone").addEventListener("click", () => { closeLive(); switchTab("activity"); });
 
 function setStage(stage, text, failed = false) {
-  $("liveStage").textContent = `${Math.min(stage, 3)}/3`;
+  $("liveStage").textContent = stage >= 4 ? "Done" : `${Math.min(stage, 3)} of 3`;
   $("liveStatus").textContent = text;
   document.querySelectorAll(".split").forEach((el) => {
     const n = Number(el.dataset.step);
@@ -216,9 +235,13 @@ function setStage(stage, text, failed = false) {
   });
 }
 
-function finishLive() {
+function finishLive(success = false) {
   clearInterval(liveTimer);
   $("live").classList.add("done");
+  $("liveTimeLabel").textContent = success ? "Total creation time" : "Stopped after";
+  $("liveEta").hidden = true;
+  $("liveNote").hidden = true;
+  $("liveClose").textContent = "Close";
   $("startBtn").disabled = false;
 }
 
@@ -233,7 +256,7 @@ async function start() {
     const taskId = d?.data?.taskId;
     if (!taskId) throw new Error("No task ID returned.");
     currentTask = { taskId, startedAt: Date.now(), meta: { runType: state.runType.name, bpm: state.bpm, mood: state.mood, genres: [...state.genres] } };
-    setStage(1, STATUS_COPY.PENDING);
+    setStage(2, (instrumentalRun && STATUS_COPY_INSTRUMENTAL.PENDING) || STATUS_COPY.PENDING);
     poll();
   } catch (e) {
     setStage(1, e.message, true);
@@ -286,9 +309,10 @@ async function poll() {
     setStage(STAGE[status] || 3, FAILURES[status] || info.errorMessage || "Generation failed.", true);
     return finishLive();
   }
-  setStage(STAGE[status] || 1, STATUS_COPY[status] || status);
+  const copy = (instrumentalRun && STATUS_COPY_INSTRUMENTAL[status]) || STATUS_COPY[status] || status;
+  setStage(STAGE[status] || 2, copy);
   if (status === "SUCCESS") {
-    finishLive();
+    finishLive(true);
     $("liveDone").hidden = false;
     refreshCredits();
     return;
@@ -298,7 +322,8 @@ async function poll() {
 
 function renderResults(taskId) {
   const ts = state.tracks.filter((t) => t.taskId === taskId);
-  $("liveTracks").textContent = ts.length;
+  // Count only finished songs; "streaming" previews are still being recorded.
+  $("liveTracks").textContent = `${ts.filter((t) => t.audio).length} / 2`;
   $("results").innerHTML = ts.map(trackHTML).join("");
 }
 
@@ -320,14 +345,33 @@ function trackHTML(t) {
         <div class="badges">
           <span class="badge volt">${esc(t.bpm)} BPM</span>
           <span class="badge">${esc(t.runType)}</span>
-          ${t.duration ? `<span class="badge">${fmtTime(t.duration)}</span>` : ready ? "" : `<span class="badge">Streaming</span>`}
+          ${t.duration ? `<span class="badge">${fmtTime(t.duration)}</span>` : ready ? "" : `<span class="badge">Preview</span>`}
         </div>
       </div>
       <div class="track-actions">
-        <button class="icon-btn play" data-play="${esc(t.id)}" ${src ? "" : "disabled"} aria-label="Play">▶</button>
+        ${playBtnHTML(t, src)}
         ${ready ? `<a class="icon-btn" href="${esc(t.audio)}" download target="_blank" rel="noopener" aria-label="Download">↓</a>` : ""}
       </div>
     </li>`;
+}
+
+function isPlaying(id) {
+  return playingId === id && !audio.paused;
+}
+function playBtnHTML(t, src) {
+  const on = isPlaying(t.id);
+  return `<button class="icon-btn play" data-play="${esc(t.id)}" ${src ? "" : "disabled"} aria-label="${on ? "Pause" : "Play"}">${on ? "❚❚" : "▶"}</button>`;
+}
+// Keep every play button (Activity list, live results, mini player) in sync with the audio element.
+function syncPlayButtons() {
+  document.querySelectorAll("[data-play]").forEach((b) => {
+    const on = isPlaying(b.dataset.play);
+    b.textContent = on ? "❚❚" : "▶";
+    b.setAttribute("aria-label", on ? "Pause" : "Play");
+  });
+  const on = !audio.paused;
+  $("playerToggle").textContent = on ? "❚❚" : "▶";
+  $("playerToggle").setAttribute("aria-label", on ? "Pause" : "Play");
 }
 
 function renderActivity() {
@@ -348,8 +392,6 @@ function renderActivity() {
 }
 
 // ---------- player ----------
-const audio = $("audio");
-let playingId = null;
 
 document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-play]");
@@ -368,8 +410,7 @@ document.addEventListener("click", (e) => {
   audio.play().catch(() => {});
 });
 $("playerToggle").addEventListener("click", () => (audio.paused ? audio.play().catch(() => {}) : audio.pause()));
-audio.addEventListener("play", () => ($("playerToggle").textContent = "❚❚"));
-audio.addEventListener("pause", () => ($("playerToggle").textContent = "▶"));
+["play", "pause", "ended"].forEach((ev) => audio.addEventListener(ev, syncPlayButtons));
 audio.addEventListener("timeupdate", () => {
   $("playerBar").style.width = audio.duration ? `${(audio.currentTime / audio.duration) * 100}%` : "0";
 });
