@@ -1,0 +1,3 @@
+# Local development only. Copy to .dev.vars (git-ignored) and paste your key.
+# In production, set SUNO_API_KEY as a secret in the Cloudflare dashboard instead.
+SUNO_API_KEY=your_api_key_here

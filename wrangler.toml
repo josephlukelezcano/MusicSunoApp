@@ -1,0 +1,6 @@
+name = "stride-music"
+pages_build_output_dir = "public"
+compatibility_date = "2025-01-01"
+
+[vars]
+SUNO_API_BASE = "https://api.sunoapi.org"
